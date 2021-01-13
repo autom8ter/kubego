@@ -1,4 +1,4 @@
-module github.com/graphikDB/kubego
+module github.com/autom8ter/kubego
 
 go 1.15
 

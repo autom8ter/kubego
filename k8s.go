@@ -5,6 +5,7 @@ import (
 	"github.com/mitchellh/go-homedir"
 	"github.com/pkg/errors"
 	"io"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 	v1 "k8s.io/client-go/kubernetes/typed/apps/v1"
 	v13 "k8s.io/client-go/kubernetes/typed/batch/v1"
@@ -15,7 +16,6 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"path/filepath"
-	"strconv"
 )
 
 // Func is a function that executes against a Client
@@ -153,31 +153,9 @@ func (p *Client) Ingresses(namespace string) v14.IngressInterface {
 	return p.clientset.NetworkingV1().Ingresses(namespace)
 }
 
-type LogOpts struct {
-	Watch     bool
-	Previous  bool
-	PodID     string
-	Container string
-	Namespace string
-	Tail      int64
-}
-
 // GetLogs returns a readerCloser that streams the pod's logs
-func (p *Client) GetLogs(ctx context.Context, opts *LogOpts) (io.ReadCloser, error) {
-	req := p.clientset.RESTClient().Get().
-		Namespace(opts.Namespace).
-		Name(opts.PodID).
-		Resource("pods").
-		SubResource("log").
-		Param("follow", strconv.FormatBool(opts.Watch)).
-		Param("previous", strconv.FormatBool(opts.Previous))
-	if opts.Container != "" {
-		req.Param("container", opts.Container)
-	}
-	if opts.Tail != 0 {
-		req.Param("tailLines", strconv.FormatInt(opts.Tail, 10))
-	}
-	return req.Stream(ctx)
+func (p *Client) GetLogs(ctx context.Context, podName, namespace string, opts *corev1.PodLogOptions) (io.ReadCloser, error) {
+	return p.Pods(namespace).GetLogs(podName, opts).Stream(ctx)
 }
 
 // Do executes the given function against the client
