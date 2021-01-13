@@ -1,8 +1,10 @@
 package kubego
 
 import (
+	"context"
 	"github.com/mitchellh/go-homedir"
 	"github.com/pkg/errors"
+	"io"
 	"k8s.io/client-go/kubernetes"
 	v1 "k8s.io/client-go/kubernetes/typed/apps/v1"
 	v13 "k8s.io/client-go/kubernetes/typed/batch/v1"
@@ -13,8 +15,13 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"path/filepath"
+	"strconv"
 )
 
+// Func is a function that executes against a Client
+type Func func(c *Client) error
+
+// Client is a kubernetes client
 type Client struct {
 	clientset *kubernetes.Clientset
 }
@@ -144,4 +151,36 @@ func (p *Client) CronJobs(namespace string) v1beta1.CronJobInterface {
 // Ingresses returns an interface for managing k8s ingresses
 func (p *Client) Ingresses(namespace string) v14.IngressInterface {
 	return p.clientset.NetworkingV1().Ingresses(namespace)
+}
+
+type LogOpts struct {
+	Watch     bool
+	Previous  bool
+	PodID     string
+	Container string
+	Namespace string
+	Tail      int64
+}
+
+// GetLogs returns a readerCloser that streams the pod's logs
+func (p *Client) GetLogs(ctx context.Context, opts *LogOpts) (io.ReadCloser, error) {
+	req := p.clientset.RESTClient().Get().
+		Namespace(opts.Namespace).
+		Name(opts.PodID).
+		Resource("pods").
+		SubResource("log").
+		Param("follow", strconv.FormatBool(opts.Watch)).
+		Param("previous", strconv.FormatBool(opts.Previous))
+	if opts.Container != "" {
+		req.Param("container", opts.Container)
+	}
+	if opts.Tail != 0 {
+		req.Param("tailLines", strconv.FormatInt(opts.Tail, 10))
+	}
+	return req.Stream(ctx)
+}
+
+// Do executes the given function against the client
+func (c *Client) Do(fn Func) error {
+	return fn(c)
 }
