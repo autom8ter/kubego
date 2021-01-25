@@ -3,6 +3,7 @@ package kubego
 import (
 	"fmt"
 	"github.com/pkg/errors"
+	"helm.sh/helm/v3/cmd/helm/search"
 	"helm.sh/helm/v3/pkg/action"
 	"helm.sh/helm/v3/pkg/chart"
 	"helm.sh/helm/v3/pkg/chart/loader"
@@ -10,11 +11,13 @@ import (
 	"helm.sh/helm/v3/pkg/cli/values"
 	"helm.sh/helm/v3/pkg/downloader"
 	"helm.sh/helm/v3/pkg/getter"
+	"helm.sh/helm/v3/pkg/helmpath"
 	"helm.sh/helm/v3/pkg/release"
 	"helm.sh/helm/v3/pkg/repo"
 	"helm.sh/helm/v3/pkg/storage/driver"
 	"helm.sh/helm/v3/pkg/strvals"
 	"os"
+	"path/filepath"
 )
 
 // Helm is a v3 helm client(wrapper)
@@ -48,6 +51,16 @@ func (h *Helm) actionConfig(namespace string) (*action.Configuration, error) {
 		return nil, err
 	}
 	return actionConfig, nil
+}
+
+// Get gets a release by name
+func (h *Helm) Get(namespace string, name string) (*release.Release, error) {
+	config, err := h.actionConfig(namespace)
+	if err != nil {
+		return nil, err
+	}
+	client := action.NewGet(config)
+	return client.Run(name)
 }
 
 // Upgrade upgrades a chart in the cluster
@@ -240,6 +253,56 @@ func (h *Helm) UpdateRepos() error {
 		h.repo.Update(entry)
 	}
 	return h.repo.WriteFile(h.env.RepositoryConfig, 0700)
+}
+
+
+// SearchCharts searches for a cached helm chart.
+func (h *Helm) SearchCharts(term string, regex bool) ([]*search.Result, error) {
+	repoFile := h.env.RepositoryConfig
+	rf, err := repo.LoadFile(repoFile)
+	if err != nil {
+		return nil, err
+	}
+	i := search.NewIndex()
+	for _, re := range rf.Repositories {
+		f := filepath.Join(h.env.RepositoryCache, helmpath.CacheIndexFile(re.Name))
+		ind, err := repo.LoadIndexFile(f)
+		if err != nil {
+			if err := h.UpdateRepos(); err != nil {
+				return nil, err
+			}
+			ind, _ = repo.LoadIndexFile(f)
+		}
+		if ind != nil {
+			i.AddRepo(re.Name, ind, true)
+		}
+	}
+	return i.Search(term, 25, regex)
+}
+
+
+// AllCharts returns all cached helm charts
+func (h *Helm) AllCharts() ([]*search.Result, error) {
+	repoFile := h.env.RepositoryConfig
+	rf, err := repo.LoadFile(repoFile)
+	if err != nil {
+		return nil, err
+	}
+	i := search.NewIndex()
+	for _, re := range rf.Repositories {
+		f := filepath.Join(h.env.RepositoryCache, helmpath.CacheIndexFile(re.Name))
+		ind, err := repo.LoadIndexFile(f)
+		if err != nil {
+			if err := h.UpdateRepos(); err != nil {
+				return nil, err
+			}
+			ind, _ = repo.LoadIndexFile(f)
+		}
+		if ind != nil {
+			i.AddRepo(re.Name, ind, true)
+		}
+	}
+	return i.All(), nil
 }
 
 func (c *Helm) getLocalChart(chartName string, chartPathOptions *action.ChartPathOptions) (*chart.Chart, string, error) {
