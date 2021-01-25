@@ -15,10 +15,15 @@ import (
 	"helm.sh/helm/v3/pkg/release"
 	"helm.sh/helm/v3/pkg/repo"
 	"helm.sh/helm/v3/pkg/storage/driver"
-	"helm.sh/helm/v3/pkg/strvals"
 	"os"
 	"path/filepath"
 )
+
+// StableCharts is a helm repo entry for the standard stable helm charts: https://charts.helm.sh/stable
+var StableCharts = &repo.Entry{
+	Name: "stable",
+	URL:  "https://charts.helm.sh/stable",
+}
 
 // Helm is a v3 helm client(wrapper)
 type Helm struct {
@@ -64,7 +69,7 @@ func (h *Helm) Get(namespace string, name string) (*release.Release, error) {
 }
 
 // Upgrade upgrades a chart in the cluster
-func (h *Helm) Upgrade(namespace string, name string, args map[string]string) (*release.Release, error) {
+func (h *Helm) Upgrade(namespace string, chartName, releaseName string, recreate bool, configVals map[string]string) (*release.Release, error) {
 	config, err := h.actionConfig(namespace)
 	if err != nil {
 		return nil, err
@@ -73,17 +78,19 @@ func (h *Helm) Upgrade(namespace string, name string, args map[string]string) (*
 	if upgrade.Version == "" {
 		upgrade.Version = ">0.0.0-0"
 	}
+	upgrade.Namespace = namespace
+	upgrade.Recreate = recreate
+	upgrade.Wait = true
 	getters := getter.All(h.env)
 	valueOpts := &values.Options{}
 	vals, err := valueOpts.MergeValues(getters)
 	if err != nil {
 		return nil, err
 	}
-	// Add args
-	if err := strvals.ParseInto(args["set"], vals); err != nil {
-		return nil, err
+	for k, v := range configVals {
+		vals[k] = v
 	}
-	chrt, _, err := h.getLocalChart(name, &upgrade.ChartPathOptions)
+	chrt, _, err := h.getLocalChart(chartName, &upgrade.ChartPathOptions)
 	if err != nil {
 		return nil, err
 	}
@@ -92,7 +99,7 @@ func (h *Helm) Upgrade(namespace string, name string, args map[string]string) (*
 			return nil, err
 		}
 	}
-	return upgrade.Run(name, chrt, vals)
+	return upgrade.Run(releaseName, chrt, vals)
 }
 
 // IsInstalled checks whether a release/chart is already installed on the cluster
@@ -112,14 +119,7 @@ func (h *Helm) IsInstalled(namespace string, release string) (bool, error) {
 }
 
 // Install a chart/release in the given namespace
-func (h *Helm) Install(namespace, name string, args map[string]string) (*release.Release, error) {
-	installed, err := h.IsInstalled(namespace, name)
-	if err != nil {
-		return nil, err
-	}
-	if installed {
-		return h.Upgrade(namespace, name, args)
-	}
+func (h *Helm) Install(namespace, chartName, releaseName string, createNamespace bool, configVals map[string]string) (*release.Release, error) {
 	config, err := h.actionConfig(namespace)
 	if err != nil {
 		return nil, err
@@ -128,17 +128,21 @@ func (h *Helm) Install(namespace, name string, args map[string]string) (*release
 	if client.Version == "" {
 		client.Version = ">0.0.0-0"
 	}
+	client.Namespace = namespace
+	client.CreateNamespace = createNamespace
+	client.IncludeCRDs = true
+	client.Wait = true
+	client.ReleaseName = releaseName
 	getters := getter.All(h.env)
 	valueOpts := &values.Options{}
 	vals, err := valueOpts.MergeValues(getters)
 	if err != nil {
 		return nil, err
 	}
-	// Add args
-	if err := strvals.ParseInto(args["set"], vals); err != nil {
-		return nil, err
+	for k, v := range configVals {
+		vals[k] = v
 	}
-	chrt, cp, err := h.getLocalChart(name, &client.ChartPathOptions)
+	chrt, cp, err := h.getLocalChart(chartName, &client.ChartPathOptions)
 	if err != nil {
 		return nil, err
 	}
@@ -161,7 +165,7 @@ func (h *Helm) Install(namespace, name string, args map[string]string) (*release
 	return client.Run(chrt, vals)
 }
 
-// Uninstall installs a chart by name
+// Uninstall uninstalls a release by name in the given namespace
 func (h *Helm) Uninstall(namespace, releaseName string) (*release.UninstallReleaseResponse, error) {
 	config, err := h.actionConfig(namespace)
 	if err != nil {
@@ -172,37 +176,37 @@ func (h *Helm) Uninstall(namespace, releaseName string) (*release.UninstallRelea
 
 }
 
-// History returns a history of releases for the chart in the given namespace
-func (h *Helm) History(namespace string, name string, max int) ([]*release.Release, error) {
+// History returns a history for the named release in the given namespace
+func (h *Helm) History(namespace string, release string, max int) ([]*release.Release, error) {
 	config, err := h.actionConfig(namespace)
 	if err != nil {
 		return nil, err
 	}
 	histClient := action.NewHistory(config)
 	histClient.Max = max
-	return histClient.Run(name)
+	return histClient.Run(release)
 }
 
 // Rollback rolls back the chart by name to the previous version
-func (h *Helm) Rollback(namespace string, name string) error {
+func (h *Helm) Rollback(namespace string, release string) error {
 	config, err := h.actionConfig(namespace)
 	if err != nil {
 		return err
 	}
 	client := action.NewRollback(config)
 	client.Recreate = true
-	return client.Run(name)
+	return client.Run(release)
 }
 
 // Status executes 'helm status' against the given release.
-func (h *Helm) Status(namespace string, name string) (*release.Release, error) {
+func (h *Helm) Status(namespace string, release string) (*release.Release, error) {
 	config, err := h.actionConfig(namespace)
 	if err != nil {
 		return nil, err
 	}
 	client := action.NewStatus(config)
 	client.ShowDescription = true
-	return client.Run(name)
+	return client.Run(release)
 }
 
 // List lists helm releases in the given namespace
@@ -255,7 +259,6 @@ func (h *Helm) UpdateRepos() error {
 	return h.repo.WriteFile(h.env.RepositoryConfig, 0700)
 }
 
-
 // SearchCharts searches for a cached helm chart.
 func (h *Helm) SearchCharts(term string, regex bool) ([]*search.Result, error) {
 	repoFile := h.env.RepositoryConfig
@@ -279,7 +282,6 @@ func (h *Helm) SearchCharts(term string, regex bool) ([]*search.Result, error) {
 	}
 	return i.Search(term, 25, regex)
 }
-
 
 // AllCharts returns all cached helm charts
 func (h *Helm) AllCharts() ([]*search.Result, error) {
