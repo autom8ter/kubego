@@ -2,7 +2,9 @@ package kubego
 
 import (
 	"fmt"
+	"github.com/pkg/errors"
 	"helm.sh/helm/v3/pkg/action"
+	"helm.sh/helm/v3/pkg/chart"
 	"helm.sh/helm/v3/pkg/chart/loader"
 	"helm.sh/helm/v3/pkg/cli"
 	"helm.sh/helm/v3/pkg/cli/values"
@@ -10,24 +12,29 @@ import (
 	"helm.sh/helm/v3/pkg/getter"
 	"helm.sh/helm/v3/pkg/release"
 	"helm.sh/helm/v3/pkg/repo"
+	"helm.sh/helm/v3/pkg/storage/driver"
 	"helm.sh/helm/v3/pkg/strvals"
-	"io"
 	"os"
 )
 
 // Helm is a v3 helm client(wrapper)
 type Helm struct {
-	env *cli.EnvSettings
+	env  *cli.EnvSettings
+	repo *repo.File
 }
 
-// NewHelm creates a new v3 helm client(wrapper). If env is nil, default settings will be applied from env helm env vars
-func NewHelm(env *cli.EnvSettings) *Helm {
-	if env == nil {
-		env = cli.New()
+type HelmOpt func(settings *cli.EnvSettings)
+
+// NewHelm creates a new v3 helm client(wrapper).
+func NewHelm(opts ...HelmOpt) (*Helm, error) {
+	h := &Helm{
+		env:  cli.New(),
+		repo: &repo.File{},
 	}
-	return &Helm{
-		env: cli.New(),
+	for _, o := range opts {
+		o(h.env)
 	}
+	return h, nil
 }
 
 func (h *Helm) actionConfig(namespace string) (*action.Configuration, error) {
@@ -43,16 +50,15 @@ func (h *Helm) actionConfig(namespace string) (*action.Configuration, error) {
 	return actionConfig, nil
 }
 
-// InstallChart installs the chart at the given chart path in the given namespace with the given arguments
-func (h *Helm) InstallChart(namespace string, chartPath string, args map[string]string) (*release.Release, error) {
+// Upgrade upgrades a chart in the cluster
+func (h *Helm) Upgrade(namespace string, name string, args map[string]string) (*release.Release, error) {
 	config, err := h.actionConfig(namespace)
 	if err != nil {
 		return nil, err
 	}
-	install := action.NewInstall(config)
-	cp, err := install.ChartPathOptions.LocateChart(chartPath, h.env)
-	if err != nil {
-		return nil, err
+	upgrade := action.NewUpgrade(config)
+	if upgrade.Version == "" {
+		upgrade.Version = ">0.0.0-0"
 	}
 	getters := getter.All(h.env)
 	valueOpts := &values.Options{}
@@ -64,52 +70,129 @@ func (h *Helm) InstallChart(namespace string, chartPath string, args map[string]
 	if err := strvals.ParseInto(args["set"], vals); err != nil {
 		return nil, err
 	}
-	charts, err := loader.Load(cp)
+	chrt, _, err := h.getLocalChart(name, &upgrade.ChartPathOptions)
 	if err != nil {
 		return nil, err
 	}
-	if req := charts.Metadata.Dependencies; req != nil {
-		if err := action.CheckDependencies(charts, req); err != nil {
-			if install.DependencyUpdate {
-				man := &downloader.Manager{
-					Out:              os.Stdout,
-					ChartPath:        cp,
-					Keyring:          install.ChartPathOptions.Keyring,
-					SkipUpdate:       false,
-					Getters:          getter.All(h.env),
-					RepositoryConfig: h.env.RepositoryConfig,
-					RepositoryCache:  h.env.RepositoryCache,
-				}
-				if err := man.Update(); err != nil {
-					return nil, err
-				}
-			} else {
-				return nil, err
-			}
+	if req := chrt.Metadata.Dependencies; req != nil {
+		if err := action.CheckDependencies(chrt, req); err != nil {
+			return nil, err
 		}
 	}
-	return install.Run(charts, vals)
+	return upgrade.Run(name, chrt, vals)
 }
 
-// UninstallChart installs the chart by name
-func (h *Helm) UninstallRelease(namespace, releaseName string) (*release.UninstallReleaseResponse, error) {
+// IsInstalled checks whether a release/chart is already installed on the cluster
+func (h *Helm) IsInstalled(namespace string, release string) (bool, error) {
+	config, err := h.actionConfig(namespace)
+	if err != nil {
+		return false, err
+	}
+	histClient := action.NewHistory(config)
+	histClient.Max = 1
+	if _, err := histClient.Run(release); err == driver.ErrReleaseNotFound {
+		return false, nil
+	} else if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// Install a chart/release in the given namespace
+func (h *Helm) Install(namespace, name string, args map[string]string) (*release.Release, error) {
+	installed, err := h.IsInstalled(namespace, name)
+	if err != nil {
+		return nil, err
+	}
+	if installed {
+		return h.Upgrade(namespace, name, args)
+	}
 	config, err := h.actionConfig(namespace)
 	if err != nil {
 		return nil, err
 	}
-	return action.NewUninstall(config).Run(releaseName)
+	client := action.NewInstall(config)
+	if client.Version == "" {
+		client.Version = ">0.0.0-0"
+	}
+	getters := getter.All(h.env)
+	valueOpts := &values.Options{}
+	vals, err := valueOpts.MergeValues(getters)
+	if err != nil {
+		return nil, err
+	}
+	// Add args
+	if err := strvals.ParseInto(args["set"], vals); err != nil {
+		return nil, err
+	}
+	chrt, cp, err := h.getLocalChart(name, &client.ChartPathOptions)
+	if err != nil {
+		return nil, err
+	}
+	if req := chrt.Metadata.Dependencies; req != nil {
+		if err := action.CheckDependencies(chrt, req); err != nil {
+			man := &downloader.Manager{
+				ChartPath:        cp,
+				Keyring:          client.ChartPathOptions.Keyring,
+				SkipUpdate:       false,
+				Getters:          getters,
+				RepositoryConfig: h.env.RepositoryConfig,
+				RepositoryCache:  h.env.RepositoryCache,
+			}
+			if err := man.Update(); err != nil {
+				return nil, err
+			}
+			return nil, err
+		}
+	}
+	return client.Run(chrt, vals)
 }
 
-// ListCharts lists helm charts in the given namespace
-func (h *Helm) ListCharts(namespace string, w io.Writer) error {
+// Uninstall installs a chart by name
+func (h *Helm) Uninstall(namespace, releaseName string) (*release.UninstallReleaseResponse, error) {
+	config, err := h.actionConfig(namespace)
+	if err != nil {
+		return nil, err
+	}
+	client := action.NewUninstall(config)
+	return client.Run(releaseName)
+
+}
+
+// History returns a history of releases for the chart in the given namespace
+func (h *Helm) History(namespace string, name string, max int) ([]*release.Release, error) {
+	config, err := h.actionConfig(namespace)
+	if err != nil {
+		return nil, err
+	}
+	histClient := action.NewHistory(config)
+	histClient.Max = max
+	return histClient.Run(name)
+}
+
+// Rollback rolls back the chart by name to the previous version
+func (h *Helm) Rollback(namespace string, name string) error {
 	config, err := h.actionConfig(namespace)
 	if err != nil {
 		return err
 	}
-	return action.NewChartList(config).Run(w)
+	client := action.NewRollback(config)
+	client.Recreate = true
+	return client.Run(name)
 }
 
-// ListReleases lists helm releases in the given namespace
+// Status executes 'helm status' against the given release.
+func (h *Helm) Status(namespace string, name string) (*release.Release, error) {
+	config, err := h.actionConfig(namespace)
+	if err != nil {
+		return nil, err
+	}
+	client := action.NewStatus(config)
+	client.ShowDescription = true
+	return client.Run(name)
+}
+
+// List lists helm releases in the given namespace
 func (h *Helm) ListReleases(namespace string) ([]*release.Release, error) {
 	config, err := h.actionConfig(namespace)
 	if err != nil {
@@ -118,7 +201,7 @@ func (h *Helm) ListReleases(namespace string) ([]*release.Release, error) {
 	return action.NewList(config).Run()
 }
 
-// AddRepo adds a helm repository
+// AddRepo adds or updates a helm repository
 func (h *Helm) AddRepo(entry *repo.Entry) error {
 	r, err := repo.NewChartRepository(entry, getter.All(h.env))
 	if err != nil {
@@ -127,7 +210,12 @@ func (h *Helm) AddRepo(entry *repo.Entry) error {
 	if _, err := r.DownloadIndexFile(); err != nil {
 		return err
 	}
-	return nil
+	if h.repo.Has(entry.Name) {
+		return nil
+	}
+
+	h.repo.Update(entry)
+	return h.repo.WriteFile(h.env.RepositoryConfig, 0700)
 }
 
 // UpdateRepos updates all local helm repos
@@ -137,10 +225,35 @@ func (h *Helm) UpdateRepos() error {
 	if err != nil {
 		return err
 	}
-	for _, r := range f.Repositories {
-		if err := h.AddRepo(r); err != nil {
+	for _, entry := range f.Repositories {
+		r, err := repo.NewChartRepository(entry, getter.All(h.env))
+		if err != nil {
 			return err
 		}
+		if _, err := r.DownloadIndexFile(); err != nil {
+			return err
+		}
+		if h.repo.Has(entry.Name) {
+			return nil
+		}
+
+		h.repo.Update(entry)
 	}
-	return nil
+	return h.repo.WriteFile(h.env.RepositoryConfig, 0700)
+}
+
+func (c *Helm) getLocalChart(chartName string, chartPathOptions *action.ChartPathOptions) (*chart.Chart, string, error) {
+	chartPath, err := chartPathOptions.LocateChart(chartName, c.env)
+	if err != nil {
+		return nil, "", err
+	}
+	helmChart, err := loader.Load(chartPath)
+	if err != nil {
+		return nil, "", err
+	}
+
+	if helmChart.Metadata.Deprecated {
+		return nil, "", errors.New("deprecated chart")
+	}
+	return helmChart, chartPath, err
 }
