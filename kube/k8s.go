@@ -1,4 +1,4 @@
-package kubego
+package kube
 
 import (
 	"context"

@@ -1,4 +1,4 @@
-package kubego
+package istio
 
 import (
 	"github.com/mitchellh/go-homedir"

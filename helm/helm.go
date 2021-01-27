@@ -1,4 +1,4 @@
-package kubego
+package helm
 
 import (
 	"fmt"
@@ -27,20 +27,39 @@ var StableCharts = &repo.Entry{
 
 // Helm is a v3 helm client(wrapper)
 type Helm struct {
-	env  *cli.EnvSettings
-	repo *repo.File
+	env    *cli.EnvSettings
+	repo   *repo.File
+	logger func(format string, args ...interface{})
 }
 
-type HelmOpt func(settings *cli.EnvSettings)
+// HelmOpt is an optional argument to modify the helm client
+type HelmOpt func(h *Helm)
+
+// WithLogger modifies default logger
+func WithLogger(logger func(format string, args ...interface{})) HelmOpt {
+	return func(h *Helm) {
+		h.logger = logger
+	}
+}
+
+// WithEnvFunc modifies helm environmental settings
+func WithEnvFunc(fn func(settings *cli.EnvSettings)) HelmOpt {
+	return func(h *Helm) {
+		fn(h.env)
+	}
+}
 
 // NewHelm creates a new v3 helm client(wrapper).
 func NewHelm(opts ...HelmOpt) (*Helm, error) {
 	h := &Helm{
 		env:  cli.New(),
 		repo: &repo.File{},
+		logger: func(format string, args ...interface{}) {
+			fmt.Printf(format, args...)
+		},
 	}
 	for _, o := range opts {
-		o(h.env)
+		o(h)
 	}
 	return h, nil
 }
@@ -50,9 +69,7 @@ func (h *Helm) actionConfig(namespace string) (*action.Configuration, error) {
 	if namespace == "" {
 		namespace = h.env.Namespace()
 	}
-	if err := actionConfig.Init(h.env.RESTClientGetter(), namespace, os.Getenv("HELM_DRIVER"), func(format string, args ...interface{}) {
-		fmt.Printf(format, args...)
-	}); err != nil {
+	if err := actionConfig.Init(h.env.RESTClientGetter(), namespace, os.Getenv("HELM_DRIVER"), h.logger); err != nil {
 		return nil, err
 	}
 	return actionConfig, nil
@@ -64,6 +81,7 @@ func (h *Helm) Get(namespace string, name string) (*release.Release, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	client := action.NewGet(config)
 	return client.Run(name)
 }
@@ -209,13 +227,19 @@ func (h *Helm) Status(namespace string, release string) (*release.Release, error
 	return client.Run(release)
 }
 
-// List lists helm releases in the given namespace
-func (h *Helm) ListReleases(namespace string) ([]*release.Release, error) {
+// SearchReleases searches for helm releases. If namespace is empty, all namespaces will be searched.
+func (h *Helm) SearchReleases(namespace, selector string, limit, offset int) ([]*release.Release, error) {
 	config, err := h.actionConfig(namespace)
 	if err != nil {
 		return nil, err
 	}
-	return action.NewList(config).Run()
+	client := action.NewList(config)
+	client.StateMask = action.ListAll
+	client.Limit = limit
+	client.Selector = selector
+	client.AllNamespaces = namespace == ""
+	client.Offset = offset
+	return client.Run()
 }
 
 // AddRepo adds or updates a helm repository
@@ -253,7 +277,6 @@ func (h *Helm) UpdateRepos() error {
 		if h.repo.Has(entry.Name) {
 			return nil
 		}
-
 		h.repo.Update(entry)
 	}
 	return h.repo.WriteFile(h.env.RepositoryConfig, 0700)
@@ -282,6 +305,7 @@ func (h *Helm) SearchCharts(term string, regex bool) ([]*search.Result, error) {
 	}
 	return i.Search(term, 25, regex)
 }
+
 
 // AllCharts returns all cached helm charts
 func (h *Helm) AllCharts() ([]*search.Result, error) {

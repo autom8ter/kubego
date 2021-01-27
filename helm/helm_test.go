@@ -1,16 +1,16 @@
-package kubego_test
+package helm_test
 
 import (
-	"github.com/autom8ter/kubego"
+	"github.com/autom8ter/kubego/helm"
 	"testing"
 )
 
 func TestHelm(t *testing.T) {
-	h, err := kubego.NewHelm()
+	h, err := helm.NewHelm()
 	if err != nil {
 		t.Fatal(err.Error())
 	}
-	if err := h.AddRepo(kubego.StableCharts); err != nil {
+	if err := h.AddRepo(helm.StableCharts); err != nil {
 		t.Fatal(err)
 	}
 	results, err := h.AllCharts()
@@ -23,7 +23,7 @@ func TestHelm(t *testing.T) {
 	for _, r := range results {
 		t.Log(r.Name)
 	}
-	releases, err := h.ListReleases("hermes-admin")
+	releases, err := h.SearchReleases("hermes-admin", "", 5, 0)
 	if err != nil {
 		t.Fatal(err.Error())
 	}
